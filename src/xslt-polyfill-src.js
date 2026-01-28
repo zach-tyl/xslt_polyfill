@@ -215,6 +215,7 @@
             // 5. Convert the result pointers (char*) back to JS strings.
             let resultString = readStringFromHeap(resultPtr);
             let mimeTypeString = readStringFromHeap(mimeTypePtr);
+            let wasPlainText = false;
 
             // 6. Free the result pointer itself, which was allocated by the C code.
             wasm_free(resultPtr);
@@ -224,11 +225,13 @@
               resultString = resultString.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               resultString = `<html xmlns="http://www.w3.org/1999/xhtml">\n<head><title></title></head>\n<body>\n<pre>${resultString}</pre>\n</body>\n</html>`;
               mimeTypeString = 'application/xml';
+              wasPlainText = true;
             }
 
             return {
                 content: resultString,
-                mimeType: mimeTypeString
+                mimeType: mimeTypeString,
+                wasPlainText
             };
           };
 
@@ -244,7 +247,7 @@
             return resultPtr_or_Promise.then(resultPtr => finishProcessing(resultPtr));
           }
           // Not a promise - just return the finished object.
-          return finishProcessing(resultPtr_or_Promise);
+      return finishProcessing(resultPtr_or_Promise);
       } finally {
           // 7. Clean up all allocated memory to prevent memory leaks in the Wasm heap.
           if (xmlPtr) wasm_free(xmlPtr);
@@ -258,6 +261,33 @@
 
     function isEmptySourceDocument(source) {
       return source && source.nodeType === Node.DOCUMENT_NODE && !source.documentElement;
+    }
+
+    function trimTrailingBodyWhitespace(doc, mimeType) {
+      if (!doc || !doc.documentElement) return;
+      const xhtmlNs = 'http://www.w3.org/1999/xhtml';
+      const isHtmlLike = mimeType === 'text/html' ||
+        (doc.documentElement.namespaceURI === xhtmlNs &&
+         doc.documentElement.localName === 'html');
+      if (!isHtmlLike) return;
+      const body = doc.body || doc.getElementsByTagNameNS(xhtmlNs, 'body')[0];
+      if (!body || !body.lastChild || body.lastChild.nodeType !== Node.TEXT_NODE) return;
+      const data = body.lastChild.data;
+      if (!data || !/\S/.test(data)) {
+        const prev = body.lastChild.previousSibling;
+        if (prev && prev.nodeType === Node.ELEMENT_NODE) {
+          body.lastChild.remove();
+        }
+      }
+      const html = doc.documentElement;
+      if (html && html.lastChild && html.lastChild.nodeType === Node.TEXT_NODE) {
+        const htmlData = html.lastChild.data;
+        const htmlPrev = html.lastChild.previousSibling;
+        if ((!htmlData || !/\S/.test(htmlData)) &&
+            htmlPrev && htmlPrev.nodeType === Node.ELEMENT_NODE) {
+          html.lastChild.remove();
+        }
+      }
     }
 
     class XSLTProcessor {
@@ -284,8 +314,12 @@
           return null;
         }
         const sourceXml = (new XMLSerializer()).serializeToString(source);
-        const {content, mimeType} = transformXmlWithXslt(sourceXml, this.#stylesheetText, this.#parameters, this.#stylesheetBaseUrl, /*allowAsync*/false, /*buildPlainText*/true);
-        return (new DOMParser()).parseFromString(content, mimeType);
+        const {content, mimeType, wasPlainText} = transformXmlWithXslt(sourceXml, this.#stylesheetText, this.#parameters, this.#stylesheetBaseUrl, /*allowAsync*/false, /*buildPlainText*/true);
+        const doc = (new DOMParser()).parseFromString(content, mimeType);
+        if (!wasPlainText) {
+          trimTrailingBodyWhitespace(doc, mimeType);
+        }
+        return doc;
       }
 
       // Returns a fragment. In the case of HTML, head/body are flattened.
